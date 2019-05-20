@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>netcoreapp2.1</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Utils.fs" />
+    <Compile Include="PatchExpr.fs" />
+    <Compile Include="Cartridge.fs" />
+    <Compile Include="Linker.fs" />
+    <Compile Include="OpCodes.fs" />
+    <Compile Include="Assembler.fs" />
+    <Compile Include="ParserBuilder.fs" />
+    <Compile Include="AsmParser.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+</Project>
