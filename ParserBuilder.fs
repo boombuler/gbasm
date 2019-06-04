@@ -1,18 +1,20 @@
-﻿module ParserBuilder
+module ParserBuilder
 
 open System;
 
 type Position = {
     line : int
     column : int
+    fileName : string
 }
 
 type InputState = {
     lines : string[]
     position : Position 
+    parentState: InputState option
 }
 
-let private initialPos = {line=0; column=0}
+let private initialPos = {line=0; column=0; fileName=""}
 
 /// increment the column number
 let private incrCol pos = 
@@ -20,19 +22,28 @@ let private incrCol pos =
 
 /// increment the line number and set the column to 0
 let private incrLine pos = 
-    {line=pos.line + 1; column=0}
+    {line=pos.line + 1; column=0; fileName=pos.fileName }
 
 let fromStr str = 
     if String.IsNullOrEmpty(str) then
-        {lines=[||]; position=initialPos}
+        {lines=[||]; position=initialPos; parentState = None}
     else
         let separators = [| "\r\n"; "\n" |]
         let lines = str.Split(separators, StringSplitOptions.None)
-        {lines=lines; position=initialPos}
+        {lines=lines; position=initialPos; parentState = None}
+
+let fromFile fileName content =
+    let input = fromStr content
+    {input with position = { input.position with fileName = fileName} }
 
 let private nextChar input =
     let linePos = input.position.line
     let colPos = input.position.column
+
+    let NoMoreInput = 
+        match input.parentState with
+        | Some ps -> ps, Some '\n'
+        | None -> input, None
     // three cases
     // 1) if line >= maxLine -> 
     // return EOF
@@ -40,9 +51,8 @@ let private nextChar input =
     // return char at colPos, increment colPos
     // 3) if col at line length -> 
     // return NewLine, increment linePos
-
     if linePos >= input.lines.Length then
-        input, None
+       NoMoreInput 
     else
         let currentLine = input.lines.[linePos]
         if colPos < currentLine.Length then
@@ -58,7 +68,7 @@ let private nextChar input =
                 let newState = {input with position=newPos}
                 newState, Some char
             else 
-                input, None
+                NoMoreInput
 
 type ParserLabel = string
 type ParserError = (ParserLabel*string*Position)
@@ -132,8 +142,7 @@ let private andParse parser1 parser2 =
         | Ok (c1, remaining1) ->
             match run parser2 remaining1 with
             | Error msg -> Error msg
-            | Ok (c2, remaining2) ->
-                Ok ((c1, c2), remaining2)
+            | Ok (c2, remaining2) -> Ok ((c1, c2), remaining2)
     {fn=innerParser; label=label}
 let ( .>>. ) = andParse
 
@@ -169,16 +178,13 @@ let map mapFunc parser =
     {fn=innerParser; label=parser.label}
 let (|>>) p m = map m p
 
-
-
-
 let (.>>) p1 p2 = 
     p1 .>>. p2 
-    |>> fun (a,b) -> a
+    |>> fun (a,_) -> a
 
 let (>>.) p1 p2 = 
     p1 .>>. p2 
-    |>> fun (a,b) -> b
+    |>> fun (_,b) -> b
 
 let apply funcAsParser paramAsParser =
     (funcAsParser .>>. paramAsParser)
