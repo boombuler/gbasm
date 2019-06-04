@@ -25,7 +25,7 @@ type Operation =
     | Hi
     | Lo
     
-let Run (curAdr:uint16) (getSymAdr: SymbolName -> (BankNo * uint16) option) (ops: Operation list) : Result<int, string> =
+let Run (curAdr:uint16 option) (getSymAdr: SymbolName -> (BankNo * uint16) option) (ops: Operation list) : Result<int, string> =
     let push v stack =     
         Ok (v::stack)
 
@@ -67,7 +67,9 @@ let Run (curAdr:uint16) (getSymAdr: SymbolName -> (BankNo * uint16) option) (ops
             | Some (bank, _) -> push bank stack
             | None -> Error (sprintf "Unknown Symbol %A" name)
         | CurAdr ->
-            push (int curAdr) stack
+            match curAdr with
+            | Some curAdr -> push (int curAdr) stack
+            | None -> Error "unknown current address"
         | Hi -> unaryOp (fun v -> ((v>>>8)&&&0xFF))
         | Lo -> unaryOp (fun v -> v&&&0xFF)
 
