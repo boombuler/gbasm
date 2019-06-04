@@ -1,4 +1,4 @@
-module ParserBuilder
+﻿module ParserBuilder
 
 open System;
 
@@ -71,7 +71,10 @@ let private nextChar input =
                 NoMoreInput
 
 type ParserLabel = string
-type ParserError = (ParserLabel*string*Position)
+type ParserErrorType = 
+    | Missmatch
+    | Fail
+type ParserError = (ParserLabel*string*Position*ParserErrorType)
 
 type Parser<'a, 'state> = {
     fn : (('state*InputState) -> Result<'a * ('state * InputState), ParserError>)
@@ -85,19 +88,19 @@ let EOF =
         | state, None -> Ok ((), (s, state))
         | _, Some ch ->     
             let err = sprintf "Unexpected '%c' expected EOF" ch
-            Error (label,err, input.position)
+            Error (label,err, input.position, Missmatch)
     {fn=innerFn;label=label}
 
 let satisfy predicate label =
     let innerFn (s, input) =
         match nextChar input with
-        | _, None -> Error (label,"No more input", input.position)
+        | _, None -> Error (label,"No more input", input.position, Missmatch)
         | newState, Some ch ->     
             if predicate ch then
                 Ok (ch,(s, newState))
             else
                 let err = sprintf "Unexpected '%c'" ch
-                Error (label,err, input.position)
+                Error (label,err, input.position, Missmatch)
     {fn=innerFn;label=label}
 
 let setLabel parser newLabel = 
@@ -106,7 +109,8 @@ let setLabel parser newLabel =
         let result = parser.fn input
         match result with
         | Ok s -> Ok s 
-        | Error (_,err, pos) -> Error (newLabel,err, pos)
+        | Error (l, m, p, Fail) -> Error (l, m, p, Fail)
+        | Error (_,err, pos, t) -> Error (newLabel,err, pos, t)
     {fn=newInnerFn; label=newLabel}
 let ( <?> ) = setLabel
 
@@ -123,14 +127,10 @@ let private orParse parser1 parser2 =
     let innerParser inputChars =
         match run parser1 inputChars with
         | Ok result -> Ok result
-        | Error (l1, e1, p1) -> 
-            match run parser2 inputChars with
-            | Ok result -> Ok result
-            | Error (l2, e2, p2) ->
-                if (p1.line > p2.line) || ((p1.line = p2.line) && (p1.column > p2.column)) then
-                    Error (l1, e1, p1)
-                else
-                    Error (l2, e2, p2)
+        | Error (l1, e1, p1, t1) -> 
+            match t1 with 
+            | Fail -> Error (l1, e1, p1, t1)
+            | _ -> run parser2 inputChars
     {fn = innerParser; label = label}
 let ( <|> ) = orParse
 
@@ -151,6 +151,7 @@ let terminatedList p1 p2 =
     let rec parseLoop resultSoFar inputChars =
         match run p1 inputChars with
         | Ok (result, rest) -> parseLoop (result::resultSoFar) rest
+        | Error (l, m, p, Fail) -> Error (l, m, p, Fail)
         | Error e -> 
             match run p2 inputChars with
             | Ok _ ->  Ok ((resultSoFar |> List.rev), inputChars)
@@ -216,6 +217,7 @@ let opt parser fallback =
     let innerParser inputChars = 
         match run parser inputChars with
         | Ok (result, rest) -> Ok (result, rest)
+        | Error (l, m, p, Fail) -> Error (l, m, p, Fail)
         | Error _ -> Ok (fallback, inputChars)
     {fn=innerParser; label=label}
 
@@ -224,6 +226,7 @@ let many parser =
     let rec parseLoop resultSoFar inputChars =
         match run parser inputChars with
         | Ok (result, rest) -> parseLoop (result::resultSoFar) rest
+        | Error (l, m, p, Fail) -> Error (l, m, p, Fail)
         | Error _ -> Ok ((resultSoFar|> List.rev), inputChars)
     let innerParser = parseLoop []
     {fn=innerParser; label=label}
@@ -236,9 +239,9 @@ let many1 parser =
             match list with 
             | [] -> 
                 let (_, input) = input
-                Error (label, "At least one element expected", input.position)
+                Error (label, "At least one element expected", input.position, Missmatch)
             | _ -> Ok (list, remaining)
-        | Error (l, e, p) -> Error (l, e, p)
+        | Error e -> Error e
     {fn=innerParser; label=label}
 
 let private pStringCore<'s> (pc: char->Parser<char, 's>) str =
@@ -251,7 +254,6 @@ let private pStringCore<'s> (pc: char->Parser<char, 's>) str =
     |> sequenceParsers
     |>> charsToStr
     <?> str
-
 
 let pString<'s> = pStringCore<'s> pChar
 
@@ -270,8 +272,15 @@ let testValue<'a, 's> (parser: Parser<'a,'s>) (test : 'a->string option) : Parse
             | None -> Ok (s, is)
             | Some err -> 
                 let (_, input) = input
-                Error (parser.label, err, input.position)
+                Error (parser.label, err, input.position, Missmatch)
         | Error e -> Error e
     {parser with fn=newInnerFn}
 
 let (|?>) = testValue
+
+let must p =
+    let parserFn input = 
+        match run p input with 
+        | Ok r -> Ok r
+        | Error (l, m, p, _) -> Error (l, m, p, Fail)
+    {p with fn = parserFn}
