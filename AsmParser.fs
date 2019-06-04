@@ -12,13 +12,14 @@ open System.Text.RegularExpressions
 
 let private charsToStr = List.toArray >> System.String
 
-
+// Definition of an macro
 type Macro = {
     Name: string
     Args: string list
     Body: string
 }
 
+// The parser state we carry around while parsing.
 type ParserState = {
     Defines: Map<string, Operation list>
     GlobalLabel: string
@@ -27,8 +28,8 @@ type ParserState = {
 }
 
 
-
-let macroStr m =
+// convert the macro back to text. Needed for nested macros.
+let private macroStr m =
     let args = System.String.Join(", ", List.toArray m.Args)
     sprintf "MACRO %s %s %s MEND" m.Name args m.Body
 
@@ -36,6 +37,7 @@ type GetFileContentRequest = { currentFilePath: string; requestedFileName: strin
 type GetFileContentResponse = { filePath: string; content: string }
 type GetFileContent = GetFileContentRequest -> Result<GetFileContentResponse, string>
 
+// create a forward parser.
 let private forward<'a> (_: Unit) :  (Parser<'a, ParserState> * Parser<'a, ParserState> ref)  =
     let dummyParser : Parser<'a, ParserState> =
         let label = "Dummy"
@@ -50,15 +52,18 @@ let private forward<'a> (_: Unit) :  (Parser<'a, ParserState> * Parser<'a, Parse
         {fn=innerFn; label="unknown"}
     (f, fRef)
 
+// tests the parsed value and may return some error message if the test fails
 let private Assert test msg v = 
     match test v with
     | true -> None
     | false -> Some msg
 
+// Keyword parser. Keywords are case insensitive return a fixed single value
 let private kw str value =
     pStringCI str
     |>> fun _ -> value
 
+// Parses a number. Either decimal or hexadecimal (with $ prefixed)
 let private number =
     let digit =  anyCharOf (['0'..'9'] )
     let hexdigit = anyCharOf (['0'..'9'] @ ['A'..'F'] @ ['a'..'f'])
@@ -76,29 +81,35 @@ let private number =
         |>> fun s -> Convert.ToInt32(s, 16)
     (decimal <|> hexDec) <?> "number"
 
+// Parses a single whitespace character
 let private whitespaceChar = 
     let predicate = Char.IsWhiteSpace 
     let label = "whitespace"
     satisfy predicate label 
 
+// reads many but at least one whitespace character.
 let ws = 
     many1 whitespaceChar
     |>> ignore
     <?> "whitespace"
 
+// parses comments, from ';' to the end of the line.
 let lineComment = 
     (pChar ';') >>. many (satisfy (fun c -> c <> '\r' && c <> '\n') "Any")
     |>> ignore
     <?> "Comment"
 
+// parses an identifier. Identifiers start with a letter or underscores and continue with letters or digits or underscores.
 let private Identifier = 
-    let alpha = satisfy Char.IsLetter "Letter"
-    let alphaNum = satisfy Char.IsLetterOrDigit "Letter or Digit"
+    let underscore = pChar '_'
+    let alpha = (satisfy Char.IsLetter "Letter") <|> underscore
+    let alphaNum = (satisfy Char.IsLetterOrDigit "Letter or Digit") <|> underscore
 
     alpha .>>. (many alphaNum) 
     |>> fun (c, chars) -> System.String(c::chars |> List.toArray)
     <?> "Identifier"
 
+// parses a local, global or fully qualified label name.
 let private Label = 
     let localSymbol : Parser<SymbolName, ParserState> = 
         (pChar '.') >>. Identifier
@@ -113,11 +124,15 @@ let private Label =
         |!> fun (glob, s) -> { Global = glob; Local = None }, s
     (localSymbol <|> qualifiedSymbol <|> globalSymbol) <?> "Label"
 
+// skips all whitespaces and then invokes the given parser.
 let skipWS p = 
     (many whitespaceChar) >>. p
     <?> p.label
+
+// parses a single char surrounded by whitespaces.
 let sym s = skipWS (pChar s) .>> (many whitespaceChar)
 
+// parses an linker expression or calculation like 1+2 or HI(GlobalLabel)
 let private expr : Parser<Operation list, ParserState> =
     let symbol = 
             Label
@@ -167,16 +182,21 @@ let private expr : Parser<Operation list, ParserState> =
 
     addExpr <?> "Value"
  
+// parses a word calculation
 let private v_word =
     expr 
     |>> fun w -> Word.Calc w
+// parses a word value for the assembler
 let private val_nn = v_word |>> fun w -> NN w
 
+// parses a byte calculation
 let private v_byte = 
     expr 
     |>> fun w -> Byte.Calc w
+// parses a byte value for the assembler
 let private val_n = v_byte |>> fun b -> N b
 
+// parses a singed byte caluclation
 let private v_sbyte needsSign =
     let unsigned = expr |>> fun w -> SByte.Calc w
 
@@ -189,18 +209,22 @@ let private v_sbyte needsSign =
         neg_signed <|> (plus >>. skipWS unsigned)
     else
         neg_signed <|> ((opt plus '+') >>. skipWS unsigned)
+// parses a signed byte value for the assembler
 let private val_r needsSign = v_sbyte needsSign |>> fun b -> R b
 
+// erturns the name of the given union.
 let private unionName<'a> (itm: 'a) = 
     match FSharpValue.GetUnionFields(itm, typeof<'a>) with
     | case, _ -> case.Name
     | _ -> ""
 
+// create a parser for each value of the given union which are combined by or
 let private kwUnions<'a> (items :'a list) =
     items
     |> List.map (fun i -> kw (unionName<'a> i) i)
     |> List.reduce (<|>)
 
+// parses a PUSH or POP opcode
 let private op_PUSH_POP =
     let target = kwUnions [BC; DE; HL; AF]
 
@@ -212,23 +236,27 @@ let private op_PUSH_POP =
         |>> (fun t -> POP t) <?> "POP"
     [push; pop]
 
+// parses a dereference of a 16 bit register.
 let private derefR16 r = 
     let targetHL = pChar '[' >>. skipWS (kwUnions<Reg16> [r]) .>> sym ']'
     targetHL
     |>> fun a -> Deref (Reg a)
     <?> unionName r
-
+// parses a dereference of the given parser
 let private dref<'a> (p: Parser<'a, ParserState>) : Parser<'a, ParserState> =
     pChar '[' >>. skipWS p .>> sym ']'
 
+// parses an single 8 bit register
 let private r8 (r: Reg8) =
     kwUnions [r] 
     |>> (fun r -> R8 r)
 
+// parses a single 16 bit register
 let private r16 (r: Reg16) =
     kwUnions [r]
     |>> (fun r -> R16 r)
 
+// parses BIT, SET and RES opcodes.
 let private op_BIT_SET_RES =
     let num = 
         number
@@ -248,6 +276,7 @@ let private op_BIT_SET_RES =
     ]
     |> List.map (fun (s, c) -> (pStringCI s >>. ws >>. must (num .>> sym ',' .>>. skipWS target)) |>> c <?> s)
     
+// parses ADC, SBC and SUB opcodes
 let private op_ADC_SBC_SUB =
     let targetR8 = 
         kwUnions [A;B;C;D;E;H;L]
@@ -268,6 +297,7 @@ let private op_ADC_SBC_SUB =
     ]
     |> List.map makeParser
 
+// parses all the shifting opcodes.
 let private op_ShiftOps =
     let targetR8 = 
         kwUnions [A;B;C;D;E;H;L]
@@ -295,6 +325,7 @@ let private op_ShiftOps =
         <?> s
     ) 
 
+// parses the RST opcodes
 let private op_RST = 
     let validVector v = List.contains v [0x00; 0x08; 0x10; 0x18; 0x20; 0x28; 0x30; 0x38]
     let vec = 
@@ -305,6 +336,7 @@ let private op_RST =
     |>> fun v -> RST v
     <?> "RST"
 
+// parses a jump flag.
 let private jumpFlag =
     [
         kw "NZ" Flag.nz
@@ -314,10 +346,12 @@ let private jumpFlag =
     ]
     |> List.reduce (<|>)
 
+// parses the RET opcode
 let private op_RET =
     pStringCI "RET" >>. opt (ws >>. jumpFlag) Flag.Always
     |>> fun f -> RET f
 
+// parses the ADD opcodes
 let private op_ADD : Parser<OpCode,ParserState> = 
     let items = 
         [
@@ -332,6 +366,7 @@ let private op_ADD : Parser<OpCode,ParserState> =
     <?> "ADD"
     |>> (fun dstSrc -> ADD dstSrc)
 
+// parses the INC and DEC opcodes
 let private op_INC_DEC =
     let targets = 
         (kwUnions [BC; DE; HL; SP] |>> fun r -> R16 r)
@@ -344,6 +379,7 @@ let private op_INC_DEC =
     ]
     |> List.map (fun (kw, c) -> (pStringCI kw >>. ws >>. must targets) <?> kw |>> c)
 
+// parses the CALL opcode
 let private op_CALL =
     let jumpFlag = jumpFlag .>> sym ','
 
@@ -351,6 +387,7 @@ let private op_CALL =
     |>> fun (f, addr) -> CALL (f, addr)
     <?> "CALL"
 
+// parses the JP opcode
 let private op_JP =
     let jumpFlag = jumpFlag .>> sym ','
 
@@ -360,12 +397,14 @@ let private op_JP =
     |>> fun (f, v) -> JP (f, v)
     <?> "JP"
 
+// parses the JR opcode
 let private op_JR =
     let jumpFlag = jumpFlag .>> sym ','
     pStringCI "JR" >>. ws >>. (opt jumpFlag Flag.Always) .>>. skipWS (must (v_sbyte false))
     |>> fun (f, v) -> JR (f, v)
     <?> "JR"
 
+// parses the LDH opcode
 let private op_LDH =
     let args = 
         [
@@ -381,6 +420,7 @@ let private op_LDH =
     <?> "LDH"
     |>> fun (t, s) -> LDH (t, s)
 
+// parses the LD opcode
 let private op_LD = 
     let hlop str =
         let v = Deref (Reg HL)
@@ -431,6 +471,7 @@ let private op_LD =
     pStringCI "LD" >>. ws >>. must args 
     <?> "LD"
 
+// parses Data values like fixed blobs of bytes and word or a dim size value.
 let private dataExpr = 
     let numLst = 
         (must expr) .>>. (many (skipWS (pChar ',') >>. skipWS (must expr)))
@@ -462,6 +503,7 @@ let private dataExpr =
         
     ds <|> db <|> dw
 
+// parses all possible opcodes
 let private OpCode =
     let os op =
         pStringCI (unionName op)
@@ -494,6 +536,7 @@ let private OpCode =
     |> List.reduce (<|>)
     <?> "opcode"
 
+// parses a label definition
 let private LabelDef =
     let nonExp = 
         (Label .>> pChar ':') 
@@ -504,6 +547,7 @@ let private LabelDef =
     exp <|> nonExp 
     <?> "Label"
 
+// parses an file include. and updates the the input state.
 let private includeFile  (getFileContent: GetFileContent) : Parser<unit, ParserState> =
     let label = "include"
     let strChar = satisfy (fun c -> c <> '"') "char"
@@ -544,12 +588,14 @@ let private includeFile  (getFileContent: GetFileContent) : Parser<unit, ParserS
 
     { fn = fn; label = label}
 
+// parses a constant definition
 let private define =
     (pStringCI "#SET") >>. ws >>. must (Identifier .>> sym '=' .>>. expr)
     |!> fun ((i, v), s) -> 
         let s = {s with Defines = Map.add i v s.Defines }
         ((), s)
 
+// parses a macro definition
 let private macroDef = 
     let (macro, macroRef) = forward ()
 
@@ -591,6 +637,7 @@ let private macroDef =
     macro
     |!> fun (m, s) -> (), {s with Macros = Map.add m.Name m s.Macros }
 
+// parses a macro call
 let private macroCall =
     let argChr = satisfy (fun c -> c <> ',' && c <> '\n') "char"
     let arg = many1 argChr |>> charsToStr
@@ -625,7 +672,7 @@ let private macroCall =
         | Error e -> Error e
     { fn = fn; label = label }
 
-
+// parses the cartidge header values.
 let private cartridge =
     
     let quotedASCII len = 
@@ -732,18 +779,20 @@ let private cartridge =
 
     pStringCI "#CARTRIDGE." >>. must args
 
-
+// parses comments and all the things that may appear "anywhere" like includes and defines.
 let private commentsAndDefines getFileContent = many (skipWS (lineComment <|> macroDef <|> macroCall <|> define <|> cartridge <|> includeFile getFileContent)) <?> "Comments or Whitespaces"
 
+// skip and process all comments etc.
 let private skipCommentsAndDefines getFileContent p = commentsAndDefines getFileContent >>. skipWS p <?> p.label
+
+// parses a optional label followed by an opcode.
 let private Expression getFileContent : Parser<Expression, ParserState> =    
     let lbl = skipCommentsAndDefines getFileContent LabelDef <?> "Label"
     
     (opt lbl None) .>>. skipCommentsAndDefines getFileContent OpCode
     <?> "opcode"
 
-
-
+// parses a linker section.
 let private section getFileContent : Parser<Area*uint16 option*Expression list, ParserState> =
     let origin = 
         (ws >>. pCharCI '@' >>. skipWS number) |>> fun x -> Some (uint16 x)
@@ -772,11 +821,11 @@ let private section getFileContent : Parser<Area*uint16 option*Expression list, 
 
     (skipCommentsAndDefines getFileContent (pStringCI "SECTION")) >>. ws >>. must sect
 
+// parses a range of section as long as the file has more content
 let private sections getFileContent = 
     (section getFileContent) *>>! (skipCommentsAndDefines getFileContent EOF)
 
-
-
+// parse the given file and return the sections and cartridge header.
 let parse fileName (getFileContent: GetFileContent) : Result<CartridgeHeader * (Area*uint16 option*Expression list) list, string> = 
     let pState = { 
         Defines = Map.empty; 
