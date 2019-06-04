@@ -24,41 +24,54 @@ let private patchCurAdr x =
     | CurAdr -> [CurAdr; Push 1; Sub]
     | x -> [x]
 
-let private assembleData d : Result<byte[] * Patch option, string> = 
-    let bytes = 
+let private assembleOpCode opCode : Result<byte[] * Patch list, string> = 
+    let s oc = Ok ([|byte oc|], [])
+    let e oc = Ok ([|0xCBuy ;byte oc|], [])
+
+    let fix = fixRelativeExpr patchCurAdr 
+
+    let assembleData d : Result<byte[] * Patch list, string> = 
         match d with 
-        | DB bytes -> bytes
+        | DB bytes -> 
+            let data = Array.zeroCreate<byte> (List.length bytes)
+            let patches = 
+                bytes
+                |> List.mapi (fun i exp -> 
+                    let (Byte.Calc exp) = exp
+                    { Offset = i; Size = BYTE; Expr = exp }
+                )
+            Ok (data, patches)
         | DW words -> 
-            words
-            |> Array.collect (fun w -> [|byte w; byte (w >>> 8)|])
-        | DS s -> Array.zeroCreate<byte> (int s)
-    Ok (bytes, None)
+            let data = Array.zeroCreate<byte> (2 * (List.length words))
+            let patches = 
+                words
+                |> List.mapi (fun i exp -> 
+                    let (Word.Calc exp) = exp
+                    [ 
+                        { Offset = (i*2); Size = BYTE; Expr = List.append exp [Lo] } 
+                        { Offset = (i*2)+1; Size = BYTE; Expr = List.append (fix exp) [Hi] } 
+                    ]
+                )
+                |> List.collect (fun p -> p)
+            Ok (data, patches)
+        | DS s -> Ok (Array.zeroCreate<byte> (int s), [])
 
-let private assembleOpCode opCode : Result<byte[] * Patch option, string> = 
-    let s oc = 
-        Ok ([|byte oc|], None)
-    let e oc = 
-        Ok ([|0xCBuy ;byte oc|], None)
-
-    let fix = fixRelativeExpr patchCurAdr
     
     let sw oc p = 
-        match p with
-        | Word.Calc c -> 
-            let patch = { Offset = 1; Size = WORD; Expr = (fix c) }
-            Ok ([|byte oc; 0uy; 0uy|], Some patch)
+        let (Word.Calc c) = p
+        let patch = { Offset = 1; Size = WORD; Expr = (fix c) }
+        Ok ([|byte oc; 0uy; 0uy|], [patch])
 
     let sb oc p = 
-        match p with
-        | Byte.Calc c -> 
-            let patch = { Offset = 1; Size = BYTE; Expr = (fix c) }
-            Ok ([|byte oc; 0uy|], Some patch)
+        let (Byte.Calc c) = p
+        let patch = { Offset = 1; Size = BYTE; Expr = (fix c) }
+        Ok ([|byte oc; 0uy|], [patch])
 
     let Sbyte patch oc p = 
         match p with
         | SByte.Calc c -> 
             let patch = { Offset = 1; Size = SBYTE; Expr = (patch (fix c)) }
-            Ok ([|byte oc; 0uy|], Some patch)
+            Ok ([|byte oc; 0uy|], [patch])
 
     let ss = Sbyte (fun c -> c)        
     let rl = Sbyte (fixRelativeExpr relExpr)
@@ -579,12 +592,10 @@ let private isNonDataOC op =
     | _ -> true
 
 let assemble (section: (Area*uint16 option*Expression list)) : Result<Section, string> =
-    let updatePatch (p: Patch option) off = 
-        match p with 
-        | Some p -> Some {p with Offset = p.Offset + off}
-        | None -> None
+    let updatePatch off  (p: Patch) = 
+        {p with Offset = p.Offset + off}
 
-    let merge (state: (Symbol list*byte[]*Patch list)) (item: ((Label option)*byte[]*Patch Option)) =
+    let merge (state: (Symbol list*byte[]*Patch list)) (item: ((Label option)*byte[]*Patch list)) =
         let (syms, buf, patches) = state
         let (lbl, data, patch) = item
         let offset = buf.Length
@@ -596,10 +607,8 @@ let assemble (section: (Area*uint16 option*Expression list)) : Result<Section, s
                 { Name = lbl.Name; Exported = lbl.Exported; Offset = uint16 offset } :: syms
             | None -> syms
 
-        let patches = 
-            match updatePatch patch offset with
-            | Some p -> p::patches
-            | None -> patches
+        let patch = List.map (updatePatch offset) patch
+        let patches = List.append patches patch
         (syms, buf, patches)
         
     let assemble (lbl, opCode) = 

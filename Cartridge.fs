@@ -62,7 +62,7 @@ type Destination =
     | NonJapanese = 0x01uy
 
 type CartridgeHeader = {
-    Title: string // 0134-0143
+    Title: string // 0134-013E
     ManufacturerCode: string // 013F-0142
     GBC: GBCFlag // 0143 
     LicenseeCode: uint16 // 0144-0145
@@ -169,7 +169,7 @@ let headerToBytes (h:CartridgeHeader) : byte[] =
         |> Seq.iter (copyTo result data offset)
 
     copyTo (48,    0x0104, LOGO)
-    copyTo (str 16 0x0134  h.Title)
+    copyTo (str 11 0x0134  h.Title)
     copyTo (str  4 0x013F  h.ManufacturerCode)
     copyTo (bv     0x0143  (byte h.GBC))
     copyTo (word   0x0144  h.LicenseeCode)

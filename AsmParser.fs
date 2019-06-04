@@ -1,24 +1,46 @@
 ﻿module AsmParser
 
 open OpCodes
+open Cartridge
 open ParserBuilder
 open System
 open Microsoft.FSharp.Reflection
 open PatchExpr
 open Linker
+open System.Text
+open System.Text.RegularExpressions
 
 let private charsToStr = List.toArray >> System.String
+
+
+type Macro = {
+    Name: string
+    Args: string list
+    Body: string
+}
 
 type ParserState = {
     Defines: Map<string, Operation list>
     GlobalLabel: string
+    Header: CartridgeHeader
+    Macros : Map<string, Macro>
 }
+
+
+
+let macroStr m =
+    let args = System.String.Join(", ", List.toArray m.Args)
+    sprintf "MACRO %s %s %s MEND" m.Name args m.Body
+
+type GetFileContentRequest = { currentFilePath: string; requestedFileName: string }
+type GetFileContentResponse = { filePath: string; content: string }
+type GetFileContent = GetFileContentRequest -> Result<GetFileContentResponse, string>
 
 let private forward<'a> (_: Unit) :  (Parser<'a, ParserState> * Parser<'a, ParserState> ref)  =
     let dummyParser : Parser<'a, ParserState> =
         let label = "Dummy"
         let innerParser (_, input) =
-            Error (label, "Unfixed Forward Parser", input.position)
+            Error (label, "Unfixed Forward Parser", input.position, Fail)
         {fn=innerParser; label=label}
     
     let fRef = ref dummyParser
@@ -52,7 +74,7 @@ let private number =
         ((pChar '$') >>. many1 (ignUnderscore (hexdigit)))
         |>> charsToStr
         |>> fun s -> Convert.ToInt32(s, 16)
-    decimal <|> hexDec
+    (decimal <|> hexDec) <?> "number"
 
 let private whitespaceChar = 
     let predicate = Char.IsWhiteSpace 
@@ -62,6 +84,7 @@ let private whitespaceChar =
 let ws = 
     many1 whitespaceChar
     |>> ignore
+    <?> "whitespace"
 
 let lineComment = 
     (pChar ';') >>. many (satisfy (fun c -> c <> '\r' && c <> '\n') "Any")
@@ -90,7 +113,9 @@ let private Label =
         |!> fun (glob, s) -> { Global = glob; Local = None }, s
     (localSymbol <|> qualifiedSymbol <|> globalSymbol) <?> "Label"
 
-let skipWS p = (many whitespaceChar) >>. p
+let skipWS p = 
+    (many whitespaceChar) >>. p
+    <?> p.label
 let sym s = skipWS (pChar s) .>> (many whitespaceChar)
 
 let private expr : Parser<Operation list, ParserState> =
@@ -166,7 +191,6 @@ let private v_sbyte needsSign =
         neg_signed <|> ((opt plus '+') >>. skipWS unsigned)
 let private val_r needsSign = v_sbyte needsSign |>> fun b -> R b
 
-
 let private unionName<'a> (itm: 'a) = 
     match FSharpValue.GetUnionFields(itm, typeof<'a>) with
     | case, _ -> case.Name
@@ -181,10 +205,10 @@ let private op_PUSH_POP =
     let target = kwUnions [BC; DE; HL; AF]
 
     let push = 
-        pStringCI "PUSH" >>. ws >>. target 
+        pStringCI "PUSH" >>. ws >>. must target 
         |>> (fun t -> PUSH t) <?> "PUSH"
     let pop = 
-        pStringCI "POP" >>. ws >>. target 
+        pStringCI "POP" >>. ws >>. must target 
         |>> (fun t -> POP t) <?> "POP"
     [push; pop]
 
@@ -222,7 +246,7 @@ let private op_BIT_SET_RES =
         ("SET", fun x -> SET x)
         ("RES", fun x -> RES x)
     ]
-    |> List.map (fun (s, c) -> (pStringCI s >>. ws >>. num .>> sym ',' .>>. skipWS target) |>> c <?> s)
+    |> List.map (fun (s, c) -> (pStringCI s >>. ws >>. must (num .>> sym ',' .>>. skipWS target)) |>> c <?> s)
     
 let private op_ADC_SBC_SUB =
     let targetR8 = 
@@ -234,7 +258,8 @@ let private op_ADC_SBC_SUB =
 
 
     let makeParser (str, conv) =
-        pStringCI str >>. ws >>. pCharCI 'A' >>. sym ',' >>. skipWS target
+        pStringCI str >>. ws >>. must (pCharCI 'A' >>. sym ',' >>. skipWS target)
+        <?> str
         |>> conv
     [
         "ADC", fun x -> ADC (R8 A, x)
@@ -265,7 +290,7 @@ let private op_ShiftOps =
         ("CP",   fun x -> CP x)
     ]
     |> List.map (fun (s, c) -> 
-        pStringCI s >>. ws >>. target
+        pStringCI s >>. ws >>. must target
         |>> c 
         <?> s
     ) 
@@ -276,7 +301,7 @@ let private op_RST =
         number
         |?> Assert validVector "Invalid Vector"
         |>> byte
-    pStringCI "RST" >>. ws >>. vec 
+    pStringCI "RST" >>. ws >>. must vec 
     |>> fun v -> RST v
     <?> "RST"
 
@@ -303,7 +328,8 @@ let private op_ADD : Parser<OpCode,ParserState> =
         |> List.map (fun (t, s) -> t .>> sym ',' .>>. skipWS s)
         |> List.reduce (<|>)
 
-    pStringCI "ADD" >>. ws >>. items
+    pStringCI "ADD" >>. ws >>. must items
+    <?> "ADD"
     |>> (fun dstSrc -> ADD dstSrc)
 
 let private op_INC_DEC =
@@ -316,26 +342,29 @@ let private op_INC_DEC =
         "INC", fun r -> INC r
         "DEC", fun r -> DEC r
     ]
-    |> List.map (fun (kw, c) -> (pStringCI kw >>. ws >>. targets) |>> c)
+    |> List.map (fun (kw, c) -> (pStringCI kw >>. ws >>. must targets) <?> kw |>> c)
 
 let private op_CALL =
     let jumpFlag = jumpFlag .>> sym ','
 
-    pStringCI "CALL" >>. (opt jumpFlag Flag.Always) .>>. skipWS v_word
+    pStringCI "CALL" >>. ws >>. (opt jumpFlag Flag.Always) .>>. skipWS (must v_word)
     |>> fun (f, addr) -> CALL (f, addr)
+    <?> "CALL"
 
 let private op_JP =
     let jumpFlag = jumpFlag .>> sym ','
 
     let targets = ((derefR16 HL |>> fun r -> (Flag.Always, r)) <|> ((opt jumpFlag Flag.Always) .>>. skipWS val_nn))
 
-    pStringCI "JP" >>. ws >>. targets
+    pStringCI "JP" >>. ws >>. must targets
     |>> fun (f, v) -> JP (f, v)
+    <?> "JP"
 
 let private op_JR =
     let jumpFlag = jumpFlag .>> sym ','
-    pStringCI "JR" >>. ws >>. (opt jumpFlag Flag.Always) .>>. skipWS (v_sbyte false)
+    pStringCI "JR" >>. ws >>. (opt jumpFlag Flag.Always) .>>. skipWS (must (v_sbyte false))
     |>> fun (f, v) -> JR (f, v)
+    <?> "JR"
 
 let private op_LDH =
     let args = 
@@ -348,7 +377,8 @@ let private op_LDH =
         |> List.map (fun (t, s) -> t .>> sym ',' .>>. skipWS s)
         |> List.reduce (<|>)
 
-    pStringCI "LDH" >>. ws >>. args 
+    pStringCI "LDH" >>. ws >>. must args 
+    <?> "LDH"
     |>> fun (t, s) -> LDH (t, s)
 
 let private op_LD = 
@@ -398,24 +428,36 @@ let private op_LD =
         )
         |> List.map (fun (a,b,c) -> (a .>> sym ',' .>>. skipWS b) |>> c)
         |> List.reduce (<|>)
-    pStringCI "LD" >>. ws >>. args
+    pStringCI "LD" >>. ws >>. must args 
+    <?> "LD"
 
 let private dataExpr = 
     let numLst = 
-        number .>>. (many (skipWS (pChar ',') >>. skipWS number))
+        (must expr) .>>. (many (skipWS (pChar ',') >>. skipWS (must expr)))
         |>> fun (f, r) -> f::r
 
+    let convertDS (x: Operation list) : Data option = 
+        match PatchExpr.Run None (fun x -> None) x with
+        | Ok x -> 
+            let res = DS (uint16 x)
+            Some res
+        | Error _ -> None
     let ds = 
-        (pStringCI "DS") >>. ws >>. skipWS number 
-        |>> fun x -> DS (uint16 x) 
+        let exprVal = 
+            expr
+            |>> convertDS
+            |?> Assert Option.isSome "Expression must be constant"
+            |>> Option.defaultValue (DS 0us)
+
+        (pStringCI "DS") >>. ws >>. skipWS (must exprVal)
         <?> "DIM Size"
     let db = 
-        (pStringCI "DB" >>. ws >>. numLst) 
-        |>> fun x -> DB (x |> List.map byte |> List.toArray) 
+        (pStringCI "DB" >>. ws >>. (must numLst)) 
+        |>> fun x -> DB (x |> List.map Byte.Calc) 
         <?> "DIM Bytes"
     let dw = 
-        (pStringCI "DW" >>. ws >>. numLst) 
-        |>> fun x -> DW (x |> List.map uint16 |> List.toArray) 
+        (pStringCI "DW" >>. ws >>. (must numLst)) 
+        |>> fun x -> DW (x |> List.map Word.Calc) 
         <?> "DIM Words"
         
     ds <|> db <|> dw
@@ -449,7 +491,8 @@ let private OpCode =
         op_LD
         (dataExpr |>> fun d -> Data d)
     ] @ op_BIT_SET_RES @ op_PUSH_POP @ op_ShiftOps @ op_ADC_SBC_SUB @ op_INC_DEC)    
-    |> List.reduce (<|>)    
+    |> List.reduce (<|>)
+    <?> "opcode"
 
 let private LabelDef =
     let nonExp = 
@@ -461,24 +504,247 @@ let private LabelDef =
     exp <|> nonExp 
     <?> "Label"
 
+let private includeFile  (getFileContent: GetFileContent) : Parser<unit, ParserState> =
+    let label = "include"
+    let strChar = satisfy (fun c -> c <> '"') "char"
+    let quotedStr = 
+        pChar '"' >>. many strChar .>> pChar '"'
+        <?> "string"
+        |>> fun chars -> System.String(List.toArray chars)
 
+    let includeDef = pStringCI "#INCLUDE" >>. must (ws >>. quotedStr)
+
+    let rec checkRecursive state searchFN = 
+        if state.position.fileName = searchFN then
+            true
+        else
+            match state.parentState with
+            | Some ps -> checkRecursive ps searchFN
+            | None -> false
+
+    let includeFile fn (is: InputState) : Result<InputState, string> = 
+        let wantedFile = { currentFilePath = is.position.fileName; requestedFileName = fn }
+        match getFileContent wantedFile with
+        | Ok { filePath = fn; content = content } -> 
+            match checkRecursive is fn with
+            | true -> Error (sprintf "circular include of file %s" fn)
+            | false -> 
+                let newIS = fromFile fn content
+                Ok {newIS with parentState = Some is}
+        | Error e -> Error e
+
+
+    let fn (ps, is) : Result<unit * (ParserState*InputState), ParserError> =
+        match run includeDef (ps, is) with
+        | Ok (incl, (ps, is)) -> 
+            match includeFile incl is with
+            | Ok newState -> Ok ((), (ps, newState))
+            | Error e -> Error (label, e, is.position, Fail)
+        | Error e -> Error e
+
+    { fn = fn; label = label}
 
 let private define =
-    (pStringCI "#SET") >>. ws >>. Identifier .>> sym '=' .>>. expr
+    (pStringCI "#SET") >>. ws >>. must (Identifier .>> sym '=' .>>. expr)
     |!> fun ((i, v), s) -> 
         let s = {s with Defines = Map.add i v s.Defines }
         ((), s)
 
-let private comments = many (skipWS (lineComment <|> define)) <?> "Comments or Whitespaces"
+let private macroDef = 
+    let (macro, macroRef) = forward ()
 
-let private skipComments p = comments >>. skipWS p
-let private Expression : Parser<Expression, ParserState> =    
-    let lbl = skipComments LabelDef <?> "Label"
     
-    (opt lbl None) .>>. skipComments OpCode
+    let stopWord innerParser =
+        let label = "macro content"
+        let stopParser = pStringCI "MEND"
+
+        let rec parseLoop resultSoFar inputChars =
+            match run stopParser inputChars with
+            | Ok (_, rest) -> Ok (List.rev resultSoFar, rest)
+            | Error _ -> 
+                match run innerParser inputChars with
+                | Ok (res, rest) -> parseLoop (res::resultSoFar) rest
+                | Error e -> Error e
+
+        let innerParser = parseLoop []
+        {fn=innerParser; label=label}
+    
+    
+    let innerMacro = macro |>> macroStr
+        
+    let anyChar = 
+        satisfy (fun _ -> true) "AnyChar"
+        |>> fun c -> string c
+    let text = 
+        (innerMacro <|> anyChar) .>> opt lineComment ()
+
+    
+    let arg = (sym '%') >>. Identifier
+    let args = arg .>>. many (sym ',' >>. arg) |>> fun (first, other) -> first::other
+    
+
+    macroRef := 
+        (pStringCI "MACRO") >>. ws >>. must Identifier .>> ws .>>. (opt args []) .>>. must (stopWord text)    
+        |>> fun ((name, args), body) -> 
+            let body = System.String.Concat(List.toArray body)
+            { Name = name; Args = args; Body = body }
+    macro
+    |!> fun (m, s) -> (), {s with Macros = Map.add m.Name m s.Macros }
+
+let private macroCall =
+    let argChr = satisfy (fun c -> c <> ',' && c <> '\n') "char"
+    let arg = many1 argChr |>> charsToStr
+
+    let args = 
+        arg .>>. many (sym ',' >>. arg)
+        |>> fun (a, aa) -> a::aa
+
+    let expandMacro macro (args:string list) = 
+        let replaceArg (body:string) (name:string, value:string) = 
+            let pattern = sprintf @"(\%c%s(?=\W))" '%' (Regex.Escape name)
+            Regex.Replace(body, pattern, value)
+
+        if (List.length macro.Args) <> (List.length args) then
+            Error (sprintf "Argument missmatch. Expected %d args got %d" (List.length macro.Args) (List.length args))
+        else
+            Ok (List.zip macro.Args args |> List.fold replaceArg macro.Body)
+    let label = "macro call"
+
+    let fn (ps, is) : Result<unit * (ParserState*InputState), ParserError> =
+        match run (Identifier .>>. opt args []) (ps, is) with
+        | Ok ((name, args), (ps, is)) -> 
+            match Map.tryFind name ps.Macros with
+            | Some macro -> 
+                match expandMacro macro args with
+                | Ok content ->
+                    let macroName = sprintf "MACRO %s" macro.Name
+                    let state = { (fromFile macroName content) with parentState = Some is }
+                    Ok ((), (ps, state))
+                | Error msg -> Error (macro.Name, msg, is.position, Fail) 
+            | None -> Error  (label, (sprintf "unknown macro %s " name), is.position, Missmatch)
+        | Error e -> Error e
+    { fn = fn; label = label }
 
 
-let private section : Parser<Area*uint16 option*Expression list, ParserState> =
+let private cartridge =
+    
+    let quotedASCII len = 
+        let label = "ascii char"
+        let asciiChar = satisfy (fun c -> c <= (char 127) && c <> '"') label
+        let quote = 
+            pString "\\\"" 
+            |>> fun _ -> '"'
+        let asciiChar = quote <|> asciiChar <?> label
+
+        pChar '"' >>. many asciiChar .>> pChar '"'
+        <?> sprintf "ascii-string (max length = %d)" len
+        |>> fun chars -> System.String(List.toArray chars)
+        |?> Assert (fun s -> s.Length <= len)  (sprintf "max string length = %d." len)
+
+    let updateHeader upd = 
+        mapState (fun (value, state) -> (value, {state with Header = (upd state.Header value) }))
+
+    let headerFld name param upd =
+        pStringCI name >>. ws >>. must param
+        |> updateHeader upd
+        |>> fun _ -> ()
+
+    let bool = 
+        [
+            kw "ON"    true
+            kw "TRUE"  true
+            kw "YES"   true            
+            kw "OFF"   false
+            kw "FALSE" false
+            kw "NO"    false
+        ]
+        |> List.reduce (<|>)
+
+    let gbcFlag = 
+        [
+            kw "YES"        GBCFlag.GBCSupported
+            kw "ON"         GBCFlag.GBCSupported
+            kw "SUPPORTED"  GBCFlag.GBCSupported
+            kw "TRUE"       GBCFlag.GBCSupported
+
+            kw "NO"      GBCFlag.DMG
+            kw "OFF"     GBCFlag.DMG
+            kw "DMG"     GBCFlag.DMG
+            kw "FALSE"   GBCFlag.DMG
+            
+            kw "ONLY"  GBCFlag.GBCOnly
+            kw "FORCE" GBCFlag.GBCOnly
+        ]
+        |> List.reduce (<|>)
+
+    let destination = bool |>> fun v -> if v then Destination.Japanese else Destination.NonJapanese
+
+    let mbc = 
+        let flag n = (opt (ws >>. kw n true) false)
+
+        let romSize = 
+            let value = 
+                (Enum.GetValues(typeof<RomSize>) :?> (RomSize [])) |> Array.toList
+                |> List.map (fun v -> kw (v.ToString().TrimStart('_')) v)
+                |> List.reduce (<|>)
+            opt (ws >>. value) RomSize._32k
+            
+            
+        let ramSize = 
+            let value = 
+                (Enum.GetValues(typeof<RamSize>) :?> (RamSize [])) |> Array.toList
+                |> List.map (fun v -> kw (v.ToString().TrimStart('_')) v)
+                |> List.reduce (<|>)
+            opt (ws >>. value) RamSize.None
+        
+
+        let details =
+            flag "BAT" .>>. romSize .>>. ramSize
+            |>> fun ((bat, rom), ram) -> { HasBattery = bat; RomSize = rom; RamSize = ram }
+
+        let simple =
+            pStringCI "NONE" >>. flag "BAT" .>>. flag "RAM" 
+            |>> fun (bat, ram) -> Simple (ram, bat)
+        
+        let mbc1 = pStringCI "MBC1" >>. details |>> fun d -> MBC1 d
+        let mbc2 = pStringCI "MBC2" >>. flag "BAT" .>>. romSize |>> fun (bat, rom) -> MBC2 (rom, bat)
+        let mbc3 = pStringCI "MBC3" >>. details .>>. flag "TIMER" |>> fun d -> MBC3 d
+        let mbc5 = pStringCI "MBC5" >>. details .>>. flag "RUMBLE" |>> fun d -> MBC5 d
+        let mbc6 = pStringCI "MBC6" >>. details |>> fun d -> MBC6 d
+        let mbc7 = pStringCI "MBC7" >>. details |>> fun d -> MBC7 d
+        let mmm01 = pStringCI "MMM01" >>. details |>> fun d -> MBC6 d
+
+        simple <|> mbc1 <|> mbc2 <|> mbc3 <|> mbc5 <|> mbc6 <|> mbc7 <|> mmm01
+
+
+    let args = 
+        [
+            headerFld "TITLE"        (quotedASCII 11) (fun h v -> { h with Title = v })
+            headerFld "MANUFACTURER" (quotedASCII 4)  (fun h v -> { h with ManufacturerCode = v })
+            headerFld "GBC"          gbcFlag          (fun h v -> { h with GBC = v })
+            headerFld "SGB"          bool             (fun h v -> { h with SGB = v })
+            headerFld "LICENSEE"     number           (fun h v -> { h with LicenseeCode = uint16 v })
+            headerFld "VERSION"      number           (fun h v -> { h with Version = byte v })
+            headerFld "JAPANESE"     destination      (fun h v -> { h with Destination = v })
+            headerFld "MBC"          mbc              (fun h v -> { h with CartridgeType = v })
+        ]
+        |> List.reduce (<|>)
+
+    pStringCI "#CARTRIDGE." >>. must args
+
+
+let private commentsAndDefines getFileContent = many (skipWS (lineComment <|> macroDef <|> macroCall <|> define <|> cartridge <|> includeFile getFileContent)) <?> "Comments or Whitespaces"
+
+let private skipCommentsAndDefines getFileContent p = commentsAndDefines getFileContent >>. skipWS p <?> p.label
+let private Expression getFileContent : Parser<Expression, ParserState> =    
+    let lbl = skipCommentsAndDefines getFileContent LabelDef <?> "Label"
+    
+    (opt lbl None) .>>. skipCommentsAndDefines getFileContent OpCode
+    <?> "opcode"
+
+
+
+let private section getFileContent : Parser<Area*uint16 option*Expression list, ParserState> =
     let origin = 
         (ws >>. pCharCI '@' >>. skipWS number) |>> fun x -> Some (uint16 x)
     
@@ -490,35 +756,54 @@ let private section : Parser<Area*uint16 option*Expression list, ParserState> =
     let lb = (many nonLBWS) >>. pChar '\n'
 
     let sectDef h = 
-        h .>>. (opt origin None) .>> lb .>>.  (many1 Expression)
+        h .>>. (opt origin None) .>> lb .>>. must (many1 (Expression getFileContent))
         |>> fun ((a, o), ops) -> a,o, ops
 
     let romSect = sectDef rom
     let ramSect = sectDef ram
 
     let mainSect = 
-        pStringCI "MAIN" >>. (many1 Expression)
+        pStringCI "MAIN" >>. must (many1 (Expression getFileContent))
         |>> fun x -> (Area.Rom 0, Some 0x0100us, x)
 
-    let sect = romSect <|> ramSect <|> mainSect
+    let sect = 
+        romSect <|> ramSect <|> mainSect
+        <?> "SECTION"
 
-    (skipComments (pStringCI "SECTION")) >>. ws >>. sect
+    (skipCommentsAndDefines getFileContent (pStringCI "SECTION")) >>. ws >>. must sect
 
-let private sections = 
-    section *>>! (skipComments EOF)
-    
+let private sections getFileContent = 
+    (section getFileContent) *>>! (skipCommentsAndDefines getFileContent EOF)
 
- 
 
-let parse str : Result<(Area*uint16 option*Expression list) list, string> = 
-    let pState = { Defines = Map.empty; GlobalLabel = null }
 
-    (pState, fromStr str)
-    |> run sections
-    |> fun r ->
-        match r with
-        | Ok (v, _) -> Ok v
-        | Error (label, err, pos) -> 
-            let posStr = sprintf "line %d column %d" (pos.line+1) (pos.column+1)
-            let msg = sprintf "Error parsing %s at %s:\n%s" label posStr err
-            Error msg
+let parse fileName (getFileContent: GetFileContent) : Result<CartridgeHeader * (Area*uint16 option*Expression list) list, string> = 
+    let pState = { 
+        Defines = Map.empty; 
+        GlobalLabel = null; 
+        Macros = Map.empty;
+        Header = {
+            Title = ""
+            ManufacturerCode = ""
+            GBC = GBCFlag.DMG
+            LicenseeCode = 0us
+            SGB = false
+            CartridgeType = Simple (false, false)
+            Destination = Destination.Japanese
+            Version = 0uy
+        }
+    }
+
+    match getFileContent { currentFilePath = ""; requestedFileName = fileName } with 
+    | Error e -> Error e
+    | Ok { filePath = fileName; content = mainContent} -> 
+        (pState, fromFile fileName mainContent)
+        |> run (sections getFileContent)
+        |> fun r ->
+            match r with
+            | Ok (v, (ps, _)) -> Ok (ps.Header, v)
+            | Error (label, err, pos, _) -> 
+                let fn = System.IO.Path.GetFileName(pos.fileName)
+                let posStr = sprintf "\"%s\" line %d column %d" fn (pos.line+1) (pos.column+1)
+                let msg = sprintf "Error parsing %s at %s:\n%s" label posStr err
+                Error msg

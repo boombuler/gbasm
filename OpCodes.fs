@@ -38,8 +38,8 @@ type Val =
 
 type Data =
     | DS of uint16
-    | DB of byte[]
-    | DW of uint16[]
+    | DB of Byte list
+    | DW of Word list
 
 
 type OpCode =

@@ -40,20 +40,7 @@ let showUsage () =
 
 
 let assembleAndLink opt = 
-    let header = {
-        Title = "ToDo"
-        ManufacturerCode = "FOO"
-        GBC = GBCFlag.DMG
-        LicenseeCode = 0us
-        SGB = false
-        CartridgeType = Simple (true, true) 
-        Destination = Destination.NonJapanese
-        Version = 0uy
-    }
-
-
     if opt.InputFile.IsSome && System.IO.File.Exists(opt.InputFile.Value) then
-        let input = System.IO.File.ReadAllText(opt.InputFile.Value)
         let assembleAll = List.map assemble >> CollectResults
 
         let writeFile (fn: string option) (w : Writer) =
@@ -63,11 +50,25 @@ let assembleAndLink opt =
                 w f
             | None -> ()
 
+        let getFile req = 
+            let basePath = 
+                match req.currentFilePath with 
+                | "" -> Environment.CurrentDirectory
+                | currentFile -> System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(currentFile))
+            let fn = System.IO.Path.GetFullPath(req.requestedFileName, basePath)
+            if System.IO.File.Exists(fn) then
+                Ok { filePath = fn; content = System.IO.File.ReadAllText(fn) }
+            else
+                Error (sprintf "File %s does not exist" fn)
+            
 
         let res =
-            parse input 
-            |> Result.bind assembleAll
-            |> Result.bind (Link header)
+            parse opt.InputFile.Value getFile
+            |> Result.bind ( fun (h, sects) -> 
+                match assembleAll sects with 
+                | Ok res -> Link h res
+                | Error e -> Error e
+            )
        
         match res with
         | Ok linkRes ->

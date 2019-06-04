@@ -266,7 +266,7 @@ let private applyPatches (sects:Section list) :Result<Section list, string> =
 
                         let curAdr = (int sectOff) + patch.Offset
 
-                        PatchExpr.Run (uint16 curAdr) getOffset patch.Expr
+                        PatchExpr.Run (Some (uint16 curAdr)) getOffset patch.Expr
                         |> Result.bind writePatch
 
 
