@@ -1,4 +1,4 @@
-module AsmParser
+﻿module AsmParser
 
 open OpCodes
 open Cartridge
@@ -105,6 +105,25 @@ let private lineComment =
     |>> ignore
     <?> "Comment"
 
+// returns the name of the given union.
+let private unionName<'a> (itm: 'a) = 
+    match FSharpValue.GetUnionFields(itm, typeof<'a>) with
+    | case, _ -> case.Name
+
+let private isRegisterName (n : string) = 
+    match n.Length with 
+    | 1 -> 
+        FSharpType.GetUnionCases typeof<Reg8>
+        |> Array.toList
+        |> List.map (fun n -> n.Name)
+        |> List.contains n
+    | 2 -> 
+        FSharpType.GetUnionCases typeof<Reg16> 
+        |> Array.toList
+        |> List.map (fun n -> n.Name)
+        |> List.contains n
+    | _ -> false
+
 // parses an identifier. Identifiers start with a letter or underscores and continue with letters or digits or underscores.
 let private Identifier = 
     let underscore = pChar '_'
@@ -113,6 +132,7 @@ let private Identifier =
 
     alpha .>>. (many alphaNum) 
     |>> fun (c, chars) -> System.String(c::chars |> List.toArray)
+    |?> Assert (isRegisterName >> not) "Invalid Identifier name"
     <?> "Identifier"
 
 // parses a local, global or fully qualified label name.
@@ -217,12 +237,6 @@ let private v_sbyte needsSign =
         neg_signed <|> ((opt plus '+') >>. skipWS unsigned)
 // parses a signed byte value for the assembler
 let private val_r needsSign = v_sbyte needsSign |>> fun b -> R b
-
-// erturns the name of the given union.
-let private unionName<'a> (itm: 'a) = 
-    match FSharpValue.GetUnionFields(itm, typeof<'a>) with
-    | case, _ -> case.Name
-    | _ -> ""
 
 // create a parser for each value of the given union which are combined by or
 let private kwUnions<'a> (items :'a list) =
