@@ -309,7 +309,7 @@ let private op_ShiftOps =
         kwUnions [A;B;C;D;E;H;L]
         |>> R8
     let targetHL = derefR16 HL
-    let target =  targetR8 <|> targetHL
+    let target =  targetR8 <|> targetHL <|> val_n
 
     [
         ("RLC",  fun x -> RLC  x)
