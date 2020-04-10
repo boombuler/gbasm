@@ -100,7 +100,7 @@ let ws =
     <?> "whitespace"
 
 // parses comments, from ';' to the end of the line.
-let lineComment = 
+let private lineComment = 
     (pChar ';') >>. many (satisfy (fun c -> c <> '\r' && c <> '\n') "Any")
     |>> ignore
     <?> "Comment"
@@ -176,7 +176,7 @@ let private expr : Parser<Operation list, ParserState> =
     let makeMult = makeBinary value multExpr
     let makeAdd = makeBinary multExpr addExpr
 
-    multExprRef :=         
+    multExprRef :=
         (makeMult '*' Mult) <|> (makeMult '&' BitAnd) <|> (makeMult '|' BitOr) <|> value
 
     addExprRef :=
@@ -266,7 +266,7 @@ let private r16 (r: Reg16) =
 let private op_BIT_SET_RES =
     let num = 
         number
-        |?> Assert (fun i -> i >= 0 && i < 8)  "Bit number must between 0 and 7"           
+        |?> Assert (fun i -> i >= 0 && i < 8)  "Bit number must between 0 and 7"
         |>> fun i -> byte i
    
     let targetR8 = 
@@ -307,7 +307,7 @@ let private op_ADC_SBC_SUB =
 let private op_ShiftOps =
     let targetR8 = 
         kwUnions [A;B;C;D;E;H;L]
-        |>> fun x -> R8 x
+        |>> R8
     let targetHL = derefR16 HL
     let target =  targetR8 <|> targetHL
 
@@ -355,7 +355,7 @@ let private jumpFlag =
 // parses the RET opcode
 let private op_RET =
     pStringCI "RET" >>. opt (ws >>. jumpFlag) Flag.Always
-    |>> fun f -> RET f
+    |>> RET
 
 // parses the ADD opcodes
 let private op_ADD : Parser<OpCode,ParserState> = 
