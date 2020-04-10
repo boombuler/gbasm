@@ -1,4 +1,4 @@
-﻿module AsmParser
+module AsmParser
 
 open OpCodes
 open Cartridge
@@ -67,6 +67,7 @@ let private kw str value =
 let private number =
     let digit =  anyCharOf (['0'..'9'] )
     let hexdigit = anyCharOf (['0'..'9'] @ ['A'..'F'] @ ['a'..'f'])
+    let bindigit = anyCharOf(['0'..'1'])
 
     let underscore = many (pChar '_')
     let ignUnderscore p = underscore >>. p .>> underscore
@@ -79,7 +80,12 @@ let private number =
         ((pChar '$') >>. many1 (ignUnderscore (hexdigit)))
         |>> charsToStr
         |>> fun s -> Convert.ToInt32(s, 16)
-    (decimal <|> hexDec) <?> "number"
+    let bin =
+        ((pStringCI "0b") >>. many1 (ignUnderscore bindigit))
+        |>> charsToStr
+        |>> fun s -> Convert.ToInt32(s, 2)
+
+    (bin <|> decimal <|> hexDec) <?> "number"
 
 // Parses a single whitespace character
 let private whitespaceChar = 
