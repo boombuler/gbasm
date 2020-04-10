@@ -73,7 +73,7 @@ let private assembleOpCode opCode : Result<byte[] * Patch list, string> =
             let patch = { Offset = 1; Size = SBYTE; Expr = (patch (fix c)) }
             Ok ([|byte oc; 0uy|], [patch])
 
-    let ss = Sbyte (fun c -> c)        
+    let ss = Sbyte (fun c -> c)
     let rl = Sbyte (fixRelativeExpr relExpr)
         
 
@@ -315,7 +315,7 @@ let private assembleOpCode opCode : Result<byte[] * Patch list, string> =
     | LDH (R8 A, R8 C)                 -> s  0xF2    // F2 LDH A, ($FF00+C)
     | DI                               -> s  0xF3    // F3 DI
     | PUSH AF                          -> s  0xF5    // F5 PUSH AF
-    | OR (N v)                         -> s  0xF6    // F6 OR n
+    | OR (N v)                         -> sb 0xF6 v  // F6 OR n
     | RST 0x30uy                       -> s  0xF7    // F7 RST 30
     | LD (R16 HL, R v)                 -> ss 0xF8 v  // F8 LD HL, (SP+d)
     | LD (R16 SP, R16 HL)              -> s  0xF9    // F9 LD SP, HL
