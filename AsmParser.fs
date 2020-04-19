@@ -1,4 +1,4 @@
-﻿module AsmParser
+module AsmParser
 
 open OpCodes
 open Cartridge
@@ -158,6 +158,9 @@ let skipWS p =
 // parses a single char surrounded by whitespaces.
 let sym s = skipWS (pChar s) .>> (many whitespaceChar)
 
+let symStr s = skipWS (pString s) .>> (many whitespaceChar)
+
+
 // parses an linker expression or calculation like 1+2 or HI(GlobalLabel)
 let private expr : Parser<Operation list, ParserState> =
     let symbol = 
@@ -179,28 +182,31 @@ let private expr : Parser<Operation list, ParserState> =
         fnCall "BANK" symbol
         |>> fun s -> [s]
 
-    
+    let (unary, unaryRef) = forward ()
     let (func, funcRef) = forward ()
     let (multExpr, multExprRef) = forward ()
     let (addExpr, addExprRef) = forward ()
+    let (unaryExpr, unaryExprRef) = forward()
 
     let par = sym '(' >>. (skipWS addExpr) .>> sym ')'
 
     let value = 
-        number <|> func <|> bankNo <|> (symbol |>> fun s -> [s]) <|> par
+        number <|> unary <|> func <|> bankNo <|> (symbol |>> fun s -> [s]) <|> par
+
+    unaryRef := (sym '~' >>. value) |>> fun v -> v @ [Invert]
 
     let makeBinary left right chr (op: Operation) =
-             (left .>> sym chr .>>. (skipWS right))
+             (left .>> symStr chr .>>. (skipWS right))
              |>> fun (a, b) -> a @ b @ [ op ]
 
     let makeMult = makeBinary value multExpr
     let makeAdd = makeBinary multExpr addExpr
 
     multExprRef :=
-        (makeMult '*' Mult) <|> (makeMult '&' BitAnd) <|> (makeMult '|' BitOr) <|> value
+        (makeMult "*" Mult) <|> (makeMult "&" BitAnd) <|> (makeMult "|" BitOr) <|> (makeMult "<<" ShiftL)  <|> (makeMult ">>" ShiftR)<|> value
 
     addExprRef :=
-        (makeAdd '+' Add) <|> (makeAdd '-' Sub) <|> multExpr
+        (makeAdd "+" Add) <|> (makeAdd "-" Sub) <|> multExpr
     
     funcRef := 
         ((fnCall "HI" addExpr) |>> fun x -> x @ [Hi])
