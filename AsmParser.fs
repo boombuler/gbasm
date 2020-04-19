@@ -1,4 +1,4 @@
-module AsmParser
+﻿module AsmParser
 
 open OpCodes
 open Cartridge
@@ -282,10 +282,21 @@ let private r16 (r: Reg16) =
     kwUnions [r]
     |>> (fun r -> R16 r)
 
+let private constNumber =
+    let convertDS (x: Operation list) : int option = 
+        match PatchExpr.Run None (fun x -> None) x with
+        | Ok x -> Some x
+        | Error _ -> None
+    expr
+    |>> convertDS
+    |?> Assert Option.isSome "Expression must be constant"
+    |>> Option.get
+
+
 // parses BIT, SET and RES opcodes.
 let private op_BIT_SET_RES =
     let num = 
-        number
+        constNumber
         |?> Assert (fun i -> i >= 0 && i < 8)  "Bit number must between 0 and 7"
         |>> fun i -> byte i
    
@@ -499,24 +510,17 @@ let private op_LD =
 
 // parses Data values like fixed blobs of bytes and word or a dim size value.
 let private dataExpr = 
-    let numLst = 
-        (must expr) .>>. (many (skipWS (pChar ',') >>. skipWS (must expr)))
+    let numval = skipWS (must expr) 
+    let numLst =
+        numval .>>. (many ((sym ',') >>. numval))
         |>> fun (f, r) -> f::r
+    
+    let convertDS =
+        constNumber
+        |>> (uint16 >> DS)
 
-    let convertDS (x: Operation list) : Data option = 
-        match PatchExpr.Run None (fun x -> None) x with
-        | Ok x -> 
-            let res = DS (uint16 x)
-            Some res
-        | Error _ -> None
     let ds = 
-        let exprVal = 
-            expr
-            |>> convertDS
-            |?> Assert Option.isSome "Expression must be constant"
-            |>> Option.defaultValue (DS 0us)
-
-        (pStringCI "DS") >>. ws >>. skipWS (must exprVal)
+        (pStringCI "DS") >>. ws >>. skipWS (must convertDS)
         <?> "DIM Size"
     let db = 
         (pStringCI "DB" >>. ws >>. (must numLst)) 
