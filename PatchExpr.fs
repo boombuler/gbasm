@@ -19,6 +19,9 @@ type Operation =
     | Mult
     | BitAnd
     | BitOr
+    | ShiftR
+    | ShiftL
+    | Invert
     | SymAdr of SymbolName
     | SymBank of SymbolName
     | CurAdr
@@ -58,6 +61,9 @@ let Run (curAdr:uint16 option) (getSymAdr: SymbolName -> (BankNo * uint16) optio
         | Mult -> binOp (*)
         | BitAnd -> binOp (&&&)
         | BitOr -> binOp (|||)
+        | ShiftR -> binOp (>>>)
+        | ShiftL -> binOp (<<<)
+        | Invert -> unaryOp (~~~)
         | SymAdr name -> 
             match getSymAdr name with
             | Some (_, addr) -> push (int addr) stack
