@@ -557,7 +557,7 @@ let private OpCode =
         op_JR
         op_LDH
         op_LD
-        (dataExpr |>> fun d -> Data d)
+        (dataExpr |>> Data)
     ] @ op_BIT_SET_RES @ op_PUSH_POP @ op_ShiftOps @ op_ADC_SBC_SUB @ op_INC_DEC)    
     |> List.reduce (<|>)
     <?> "opcode"
