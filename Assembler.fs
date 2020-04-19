@@ -106,7 +106,7 @@ let private assembleOpCode opCode : Result<byte[] * Patch list, string> =
     | JR (Flag.Always, v)              -> rl 0x18 v  // 18 JR N
     | ADD (R16 HL, R16 DE)             -> s  0x19    // 19 ADD HL DE
     | LD (R8 A, Deref (Reg DE))        -> s  0x1A    // 1A LD A, (DE)
-    | DEC (R16 DE)                     -> s  0x18    // 1B DEC DE
+    | DEC (R16 DE)                     -> s  0x1B    // 1B DEC DE
     | INC (R8 E)                       -> s  0x1C    // 1C INC E
     | DEC (R8 E)                       -> s  0x1D    // 1D DEC E
     | LD (R8 E, N v)                   -> sb 0x1E v  // 1E LD E, n
