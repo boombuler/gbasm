@@ -210,7 +210,10 @@ let rec sequenceParsers parserList =
     | parser :: remainingParsers ->
         consAsParser parser (sequenceParsers remainingParsers)
 
-let anyCharOf chars = chars |> List.map pChar |> List.reduce orParse
+let anyCharOf chars = 
+    let predicate ch = List.contains ch chars 
+    let label = sprintf "IN (%A)" chars 
+    satisfy predicate label
 
 let opt parser fallback =
     let label = sprintf "optional %s" parser.label
